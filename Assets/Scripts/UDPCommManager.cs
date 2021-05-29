@@ -11,65 +11,73 @@ public class UDPCommManager : MonoBehaviour
     const string GALAGA_IP = "18.219.219.134";
     const int GALAGA_PORT = 1981;
 
-    public class GalagaObject
-    {
-        public byte id;
-        public byte horizontalPosition;
-        public byte verticalPosition;
+    #region Public Classes
 
-        public GalagaObject(byte p_id, byte p_horizontalPosition, byte p_verticalPosition)
+    public class InputPacket
+    {
+        public byte frame;
+        public byte input;
+        public byte ack;
+        public byte[] packet;
+    }
+
+    public class ResponsePacket
+    {
+        public byte frame;
+        public byte input;
+        public byte seq;
+        public byte[] packet;
+        public List<GalagaObject> objectList; 
+
+        public ResponsePacket() { }
+
+        public ResponsePacket(byte p_frame, byte p_input, byte p_seq, byte[] p_packet, List<GalagaObject> p_objectList)
         {
-            id = p_id;
-            horizontalPosition = p_horizontalPosition;
-            verticalPosition = p_verticalPosition;
+            frame = p_frame;
+            input = p_input;
+            seq = p_seq;
+            packet = p_packet;
+            objectList = p_objectList;
         }
     }
+
+    #endregion
     
-    public Action<uint, uint, List<GalagaObject>> ReceivedPacket;
+    public Action<ResponsePacket> ReceivedPacket;
+    public Action SendTimedOut;
+    public static UDPCommManager Instance;
     
-    [SerializeField] bool _debug = false;
+    [SerializeField] bool _debugMode = false;
 
     [Header("Packet Sender")]
     [SerializeField] bool _sendPacketPersistently = false;
     [SerializeField] [Range(0, 1)] float _sendTimeIntervals = 1;
-
-    [Header("Test packet")]
-    [SerializeField] uint _frameTest = 0;
-    [SerializeField] Enums.Input _inputTest = Enums.Input.NONE;
-    [SerializeField] uint _ackTest = 0;
+    [SerializeField] float _sendTimeOut = 1;
 
     IPEndPoint _galagaIPEndPoint;
     UdpClient _udpClient;
-    byte[] _packetToSend;
-    byte[] _lastReceivedPacket;
+    bool _isWaitingFirstPacket = false;
+    
     Coroutine _sendCoroutine;
+    InputPacket _inputPacket = new InputPacket();
+    ResponsePacket _responsePacket = new ResponsePacket();
 
-    bool _tmpFlag = false;
+    void Awake() 
+    {
+        if (Instance == null) 
+        {
+            Instance = this;
+        }
+        else
+        {
+            Destroy(this);
+            return;
+        }
+    }
 
     void Start() 
     {
         Init();
-
-        ReceivedPacket += (p_frame, p_seq, p_objectList) =>
-        {
-            if (_tmpFlag) 
-            {
-                RequestSendPacket(++p_frame, Enums.Input.NONE, p_seq);
-            }
-            else
-            {
-                RequestSendPacket(p_frame, Enums.Input.NONE, p_seq);
-                _tmpFlag = true;
-            }
-        };
-    }
-
-    void Update() 
-    {
-        if (Input.GetKeyDown(KeyCode.Space)) 
-        {
-            RequestSendPacket(_frameTest, _inputTest, _ackTest);
-        } 
     }
     
     void OnDisable() 
@@ -85,16 +93,36 @@ public class UDPCommManager : MonoBehaviour
         StartCoroutine(ReceivePacket());
     }
 
-    public void RequestSendPacket(uint p_frame, Enums.Input p_input, uint p_ack)
+    public void InitiateCommunication()
     {
+        _isWaitingFirstPacket = true;
+        RequestSendPacket(0, Enums.Input.NONE, 0);
+    }
+
+    public void EndCommunication()
+    {
+        if (_sendCoroutine != null)
+        {
+            StopCoroutine(_sendCoroutine);
+        }
+    }
+
+    void RequestSendPacket(uint p_frame, Enums.Input p_input, uint p_ack)
+    {
+        _inputPacket.frame = (byte)p_frame;
         byte __frame = (byte)(p_frame << 1);
+        
         byte __ack = (byte)(p_ack & 0b01111111);
+        _inputPacket.ack = __ack;
+        
         byte __input = (byte)p_input;
+        _inputPacket.input = __input;
+        
         __frame = (byte)(__frame | ((__input & 2) >> 1));
         __ack = (byte)(__ack | (__input << 7));
         byte[] __packet = {__frame, __ack};
+        _inputPacket.packet = __packet;
 
-        _packetToSend = __packet;
         if (_sendCoroutine != null)
         {
             StopCoroutine(_sendCoroutine);
@@ -104,14 +132,22 @@ public class UDPCommManager : MonoBehaviour
 
     IEnumerator SendPacket()
     {
+        float __timer = 0;
         do
         {
-            _udpClient.Send(_packetToSend, _packetToSend.Length);
-            byte[] __packet = (byte[])_packetToSend.Clone();
+            _udpClient.Send(_inputPacket.packet, _inputPacket.packet.Length);
+            byte[] __packet = (byte[])_inputPacket.packet.Clone();
             Array.Reverse(__packet);
-            if (_debug) Debug.Log("[UDP] \nSent packet: " + Convert.ToString(BitConverter.ToUInt16(__packet, 0), 2).PadLeft(__packet.Length * 8, '0') + "\n");
+            if (_debugMode) Debug.Log("[UDP] \nSent packet: " + Convert.ToString(BitConverter.ToUInt16(__packet, 0), 2).PadLeft(__packet.Length * 8, '0') + "\n");
 
             yield return new WaitForSecondsRealtime(_sendTimeIntervals);
+            __timer += _sendTimeIntervals;
+            if (__timer > _sendTimeOut) 
+            {
+                _sendCoroutine = null;
+                SendTimedOut?.Invoke();
+                yield break;
+            }
         }
         while (_sendPacketPersistently);
         _sendCoroutine = null;
@@ -144,49 +180,87 @@ public class UDPCommManager : MonoBehaviour
             {
                 if (IPAddress.Equals(__receiveTask.Result.RemoteEndPoint.Address, _galagaIPEndPoint.Address))
                 {
-                    _lastReceivedPacket = __receiveTask.Result.Buffer;
-                    
-                    // int __length = _lastReceivedPacket.Length;
-                    // byte[] __headerCoded = {_lastReceivedPacket[1], _lastReceivedPacket[0]};
-                    // if (_debug) Debug.Log("[UDP] \nReceived packet: " + Convert.ToString(BitConverter.ToUInt16(__headerCoded, 0), 2).PadLeft(__headerCoded.Length * 8, '0') + "\n");
-                    
-                    DecodeReceivedPacket();
-                    
-                    // byte[] __headerDecoded = {_lastReceivedPacket[1], _lastReceivedPacket[0]};
-                    // if (_debug) Debug.LogWarning("[UDP] \nReceived packet: " + Convert.ToString(BitConverter.ToUInt16(__headerDecoded, 0), 2).PadLeft(__headerDecoded.Length * 8, '0') + "\n");
-                    
-                    ExtractDataFromReceivedPacket(_lastReceivedPacket);
+                    ProcessReceivedPacket(__receiveTask.Result.Buffer);
                 }
             }
         }
     }
 
-    void DecodeReceivedPacket()
+    void ProcessReceivedPacket(byte[] p_packet)
     {
-        byte __key = (byte)(_lastReceivedPacket[0] ^ _packetToSend[0]);
-        for (int i = 0; i < _lastReceivedPacket.Length; i++)
+        p_packet = DecodeReceivedPacket(p_packet);
+        ResponsePacket __extractedData = ExtractDataFromReceivedPacket(p_packet);
+
+        if (__extractedData == null) 
         {
-            _lastReceivedPacket[i] = (byte)(_lastReceivedPacket[i] ^ __key);
+            return;
         }
-    }
+        
+        if (__extractedData.frame != _inputPacket.frame || __extractedData.input != _inputPacket.input) 
+        {
+            Debug.LogWarning(
+                "[UDP] Received packet mismatch." +
+                "\nSended frame: " + _inputPacket.frame.ToString() +
+                "\nReceived frame: " + __extractedData.frame.ToString() +
+                "\nSended input: " + _inputPacket.input.ToString() +
+                "\nReceived input: " + __extractedData.input.ToString() +
+                "\n"
+            );
+            return;
+        }
+        
+        _responsePacket = __extractedData;
+        ReceivedPacket?.Invoke(_responsePacket);
 
-    void ExtractDataFromReceivedPacket(byte[] p_packet) 
-    {
-        uint __frame = (uint)(p_packet[0] >> 1);
-        uint __seq = (uint)(p_packet[1] & 0b01111111);
-        uint __input = (uint)((p_packet[0] & 0b00000001) << 1);
-        __input |= (uint)((p_packet[1] & 0b10000000) >> 7);
-
-        if (_debug) Debug.LogWarning
+        if (_debugMode) Debug.Log
         (
             "[UDP] Received data:" +
-            "\nFrame: " + Convert.ToString((uint)__frame, 2).PadLeft(7, '0') +
-            "\nInput: " + Convert.ToString((uint)__input, 2).PadLeft(2, '0') +
-            "\nSEQ: " + Convert.ToString((uint)__seq, 2).PadLeft(7, '0') +
+            "\nFrame: " + Convert.ToString((byte)_responsePacket.frame, 2).PadLeft(7, '0') +
+            "\nInput: " + Convert.ToString((byte)_responsePacket.input, 2).PadLeft(2, '0') +
+            "\nSEQ: " + Convert.ToString((byte)_responsePacket.seq, 2).PadLeft(7, '0') +
             "\n"
         );
 
+        if (_isWaitingFirstPacket)
+        {
+            _isWaitingFirstPacket = false;
+            RequestSendPacket(0, PlayerInput.Instance.GetInput(), _responsePacket.seq);
+        }
+        else
+        {
+            RequestSendPacket(++_responsePacket.frame, PlayerInput.Instance.GetInput(), _responsePacket.seq);
+        }
+    }
+    
+    byte[] DecodeReceivedPacket(byte[] p_packet)
+    {
+        byte __key = (byte)(p_packet[0] ^ _inputPacket.packet[0]);
+        for (int i = 0; i < p_packet.Length; i++)
+        {
+            p_packet[i] = (byte)(p_packet[i] ^ __key);
+        }
+        return p_packet;
+    }
+
+    ResponsePacket ExtractDataFromReceivedPacket(byte[] p_packet) 
+    {
+        if ((p_packet.Length - 3) % 3 != 0) 
+        {
+            Debug.LogWarning("[UDP] Received packet size mismatch");
+            return null;
+        }
+        
+        byte __frame = (byte)(p_packet[0] >> 1);
+        byte __seq = (byte)(p_packet[1] & 0b01111111);
+        byte __input = (byte)((p_packet[0] & 0b00000001) << 1);
+        __input |= (byte)((p_packet[1] & 0b10000000) >> 7);
+
         byte __objectCount = p_packet[2];
+        if ((p_packet.Length - 3) / 3 != __objectCount) 
+        {
+            Debug.LogWarning("[UDP] Received packet objects size mismatch");
+            return null;
+        }
         List<GalagaObject> __objectList = new List<GalagaObject>();
         for (int i = 0; i < __objectCount; i++)
         {
@@ -194,6 +268,6 @@ public class UDPCommManager : MonoBehaviour
             __objectList.Add(__newObject);
         }
 
-        ReceivedPacket?.Invoke(__frame, __seq, __objectList);
+        return new ResponsePacket(__frame, __input, __seq, p_packet, __objectList);
     }
 }
