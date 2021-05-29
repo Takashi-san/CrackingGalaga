@@ -224,7 +224,8 @@ public class UDPCommManager : MonoBehaviour
         if (_isWaitingFirstPacket)
         {
             _isWaitingFirstPacket = false;
-            RequestSendPacket(0, PlayerInput.Instance.GetInput(), _responsePacket.seq);
+            PlayerInput.Instance.GetInput();
+            RequestSendPacket(0, Enums.Input.NONE, _responsePacket.seq);
         }
         else
         {

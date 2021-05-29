@@ -4,9 +4,9 @@ using System;
 public class PlayerInput : MonoBehaviour
 {
     public static PlayerInput Instance;
-    public Action<Enums.Input> InputUpdate;
     
     Enums.Input _input;
+    bool _alternateAutoFire;
 
     void Awake() 
     {
@@ -23,33 +23,23 @@ public class PlayerInput : MonoBehaviour
 
     void Update() 
     {
-        if (Input.GetKeyDown(KeyCode.UpArrow)) 
-        {
-            _input = Enums.Input.SHOOT;
-            InputUpdate?.Invoke(_input);
-            return;
-        }
         if (Input.GetKeyDown(KeyCode.LeftArrow)) 
         {
             _input = Enums.Input.MOVE_LEFT;
-            InputUpdate?.Invoke(_input);
             return;
         }
         if (Input.GetKeyDown(KeyCode.RightArrow)) 
         {
             _input = Enums.Input.MOVE_RIGHT;
-            InputUpdate?.Invoke(_input);
             return;
-        }
-        if (Input.GetKeyDown(KeyCode.DownArrow)) 
-        {
-            _input = Enums.Input.NONE;
-            InputUpdate?.Invoke(_input);
         }
     }
 
     public Enums.Input GetInput() 
     {
-        return _input;
+        Enums.Input __input = _input;
+        _input = _alternateAutoFire ? Enums.Input.SHOOT : Enums.Input.NONE;
+        _alternateAutoFire = !_alternateAutoFire;
+        return __input;
     }
 }
